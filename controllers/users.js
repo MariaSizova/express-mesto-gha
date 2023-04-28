@@ -103,11 +103,6 @@ const updateUserData = (req, res, updateOptions) => {
           message: `Переданы некорректные данные при обновлении профиля: ${errorMessage}`,
         });
         return;
-      }
-      if (err instanceof CastError) {
-        res
-          .status(BAD_REQUEST_ERROR_CODE)
-          .send({ message: "Передан некорректный ID пользователя" });
       } else {
         res
           .status(INTERNAL_SERVER_ERROR_CODE)
