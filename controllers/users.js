@@ -1,81 +1,127 @@
-const { DocumentNotFoundError, CastError, ValidationError } =
-  require("mongoose").Error;
+const { CastError, ValidationError } = require("mongoose").Error;
 
-const User = require("../models/user");
+// Импорт модулей bcryptjs и jsonwebtoken
+const bcrypt = require("bcryptjs"); // импортируем bcrypt
+const jwt = require("jsonwebtoken"); // импортируем модуль jsonwebtoken
 
-const {
-  CREATED_CODE,
-  BAD_REQUEST_ERROR_CODE,
-  NOT_FOUND_ERROR_CODE,
-  INTERNAL_SERVER_ERROR_CODE,
-} = require("../utils/constants");
+// Импорт классов ошибок из конструкторов ошибок
+const NotFoundError = require("../errors/NotFoundError");
+const BadRequestError = require("../errors/BadRequestError");
+const ConflictError = require("../errors/ConflictError");
+
+// Импорт модели user
+const User = require("../models/user"); // импортируем модель user
+
+// Импорт статус-кодов ошибок
+const { CREATED_201 } = require("../utils/constants");
+
+// Импорт переменной секретного ключа
+const { JWT_SECRET } = require("../utils/config");
 
 // Функция, которая возвращает всех пользователей
-const getUsers = (req, res) => {
+const getUsers = (req, res, next) => {
   User.find({})
     .then((users) => res.send(users))
-    .catch((err) => {
-      res
-        .status(INTERNAL_SERVER_ERROR_CODE)
-        .send({ message: `Произошла ошибка: ${err.name} ${err.message}` });
-    });
+    .catch(next);
 };
 
 // Функция, которая возвращает пользователя по _id
-const getUserById = (req, res) => {
-  console.log(req.params);
+const getUserById = (req, res, next) => {
   const { userId } = req.params;
 
   User.findById(userId)
-    .orFail()
     .then((user) => {
+      if (!user) {
+        throw new NotFoundError("Пользователь по указанному _id не найден");
+      }
       res.send(user);
     })
     .catch((err) => {
-      if (err instanceof DocumentNotFoundError) {
-        res.status(NOT_FOUND_ERROR_CODE).send({
-          message: "Пользователь по указанному _id не найден",
-        });
-        return;
-      }
       if (err instanceof CastError) {
-        res
-          .status(BAD_REQUEST_ERROR_CODE)
-          .send({ message: "Передан некорректный ID пользователя" });
+        next(new BadRequestError("Передан некорректный ID пользователя"));
       } else {
-        res
-          .status(INTERNAL_SERVER_ERROR_CODE)
-          .send({ message: `Произошла ошибка: ${err.name} ${err.message}` });
+        next(err);
       }
     });
 };
 
-// Функция, которая создаёт пользователя
-const createUser = (req, res) => {
-  const { name, about, avatar } = req.body;
+const getCurrentUserInfo = (req, res, next) => {
+  const userId = req.user._id;
 
-  User.create({ name, about, avatar })
+  User.findById(userId)
+    .then((user) => res.send(user))
+    .catch(next);
+};
+
+// Функция (контроллер) регистрации, которая создаёт пользователя
+const createUser = (req, res, next) => {
+  const { name, about, avatar, email, password } = req.body;
+  // хешируем пароль
+  bcrypt
+    .hash(password, 10)
+    .then((hash) =>
+      User.create({
+        name,
+        about,
+        avatar,
+        email,
+        password: hash, // записываем хеш в базу
+      })
+    )
     // вернём записанные в базу данные
-    .then((user) => res.status(CREATED_CODE).send(user))
+    .then((user) => res.status(CREATED_201).send(user))
     // данные не записались, вернём ошибку
     .catch((err) => {
+      if (err.code === 11000) {
+        next(new ConflictError("Пользователь с таким e-mail уже существует"));
+        return;
+      }
       if (err instanceof ValidationError) {
         const errorMessage = Object.values(err.errors)
           .map((error) => error.message)
-          .join(" ");
-        res.status(BAD_REQUEST_ERROR_CODE).send({
-          message: `Переданы некорректные данные при создании пользователя: ${errorMessage}`,
-        });
+          .join(", ");
+        next(
+          new BadRequestError(
+            `Переданы некорректные данные при создании пользователя: ${errorMessage}`
+          )
+        );
       } else {
-        res
-          .status(INTERNAL_SERVER_ERROR_CODE)
-          .send({ message: `Произошла ошибка: ${err.name} ${err.message}` });
+        next(err);
       }
     });
 };
 
+// Функция (контроллер) аутентификации
+const login = (req, res, next) => {
+  const { email, password } = req.body;
+
+  User.findUserByCredentials(email, password)
+    .then((user) => {
+      // создадим токен
+      const token = jwt.sign({ _id: user._id }, JWT_SECRET, {
+        expiresIn: "7d",
+      });
+      // отправим токен, браузер сохранит его в куках
+      res
+        .cookie("jwt", token, {
+          // token - наш JWT токен, который мы отправляем
+          maxAge: 3600000,
+          httpOnly: true,
+          sameSite: true, // указали браузеру посылать куки, только если запрос с того же домена
+        })
+        // отправим токен пользователю
+        .send({ token });
+      // .end(); // если у ответа нет тела, можно использовать метод end
+    })
+    .catch(next);
+};
+
+const logout = (req, res) => {
+  res.clearCookie("jwt").send({ message: "Вы вышли из системы" });
+};
+
 // Функция, которая обновляет данные пользователя
-const updateUserData = (req, res, updateOptions) => {
+const updateUserData = (req, res, next, updateOptions) => {
   const { _id: userId } = req.user;
   // обновим имя найденного по _id пользователя
   User.findByIdAndUpdate(
@@ -86,47 +132,49 @@ const updateUserData = (req, res, updateOptions) => {
       runValidators: true, // данные будут валидированы перед изменением
     }
   )
-    .orFail()
-    .then((user) => res.send(user))
-    .catch((err) => {
-      if (err instanceof DocumentNotFoundError) {
-        res.status(NOT_FOUND_ERROR_CODE).send({
-          message: "Пользователь по указанному _id не найден",
-        });
-        return;
+    .then((user) => {
+      if (!user) {
+        throw new NotFoundError("Пользователь по указанному _id не найден");
       }
+      res.send(user);
+    })
+    .catch((err) => {
       if (err instanceof ValidationError) {
         const errorMessage = Object.values(err.errors)
           .map((error) => error.message)
           .join(", ");
-        res.status(BAD_REQUEST_ERROR_CODE).send({
-          message: `Переданы некорректные данные при обновлении профиля: ${errorMessage}`,
-        });
+        next(
+          new BadRequestError(`Переданы некорректные данные: ${errorMessage}`)
+        );
         return;
+      }
+      if (err instanceof CastError) {
+        next(new BadRequestError("Передан некорректный ID пользователя"));
       } else {
-        res
-          .status(INTERNAL_SERVER_ERROR_CODE)
-          .send({ message: `Произошла ошибка: ${err.name} ${err.message}` });
+        next(err);
       }
     });
 };
 
-// Функция, которая обновляет профиль пользователя
-const updateProfile = (req, res) => {
+// Функция-декоратор, которая обновляет профиль пользователя
+const updateProfile = (req, res, next) => {
   const updateOptions = req.body;
-  updateUserData(req, res, updateOptions);
+  updateUserData(req, res, next, updateOptions);
 };
 
-// Функция, которая обновляет аватар пользователя
-const updateAvatar = (req, res) => {
+// Функция-декоратор, которая обновляет аватар пользователя
+const updateAvatar = (req, res, next) => {
   const updateOptions = req.body;
-  updateUserData(req, res, updateOptions);
+  updateUserData(req, res, next, updateOptions);
 };
 
 module.exports = {
   getUsers,
   getUserById,
+  getCurrentUserInfo,
   createUser,
+  login,
+  logout,
   updateProfile,
   updateAvatar,
 };
