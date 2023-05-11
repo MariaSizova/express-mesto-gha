@@ -111,7 +111,6 @@ const login = (req, res, next) => {
         })
         // отправим токен пользователю
         .send({ token });
-      // .end(); // если у ответа нет тела, можно использовать метод end
     })
     .catch(next);
 };
@@ -147,11 +146,6 @@ const updateUserData = (req, res, next, updateOptions) => {
           new BadRequestError(`Переданы некорректные данные: ${errorMessage}`)
         );
         return;
-      }
-      if (err instanceof CastError) {
-        next(new BadRequestError("Передан некорректный ID пользователя"));
-      } else {
-        next(err);
       }
     });
 };
